@@ -32,18 +32,21 @@ language sql stable security definer set search_path = public as $$
   select coalesce(public.mi_rol() = 'admin', false)
 $$;
 
--- Al crear un usuario se crea su perfil. El PRIMER usuario queda como admin.
+-- Al crear un usuario se crea su perfil. El PRIMER usuario queda como admin y activo.
+-- Los demás nacen como vendedor INACTIVO: solo la función admin-usuarios (que usa el
+-- administrador desde Ajustes) los activa y les asigna el rol. Así, aunque alguien
+-- lograra registrarse por su cuenta, no tendría acceso.
 create or replace function public.nuevo_usuario() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare n int;
 begin
   select count(*) into n from public.perfiles;
-  insert into public.perfiles (id, email, nombre, rol)
+  insert into public.perfiles (id, email, nombre, rol, activo)
   values (
     new.id, new.email,
-    coalesce(new.raw_user_meta_data->>'nombre', split_part(new.email,'@',1)),
-    case when n = 0 then 'admin'
-         else coalesce(nullif(new.raw_user_meta_data->>'rol',''), 'vendedor') end
+    coalesce(nullif(new.raw_user_meta_data->>'nombre',''), split_part(new.email,'@',1)),
+    case when n = 0 then 'admin' else 'vendedor' end,
+    n = 0
   )
   on conflict (id) do nothing;
   return new;
@@ -160,6 +163,13 @@ create policy adj_subir on storage.objects for insert to authenticated
 drop policy if exists adj_borrar on storage.objects;
 create policy adj_borrar on storage.objects for delete to authenticated
   using (bucket_id = 'adjuntos' and (public.es_admin() or (owner = auth.uid() and public.puede_editar())));
+
+-- ---------- Permisos de acceso a las tablas (las reglas RLS de arriba deciden qué filas) ----------
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on public.clientes, public.visitas, public.viajes, public.config, public.adjuntos to authenticated;
+grant select, update on public.perfiles to authenticated;
+grant execute on function public.mi_rol(), public.es_activo(), public.puede_editar(), public.es_admin() to authenticated;
+revoke all on public.clientes, public.visitas, public.viajes, public.config, public.adjuntos, public.perfiles from anon;
 
 -- ---------- Tiempo real (para que todos vean los cambios al instante) ----------
 do $$ declare t text; begin
